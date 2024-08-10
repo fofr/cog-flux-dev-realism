@@ -18,7 +18,6 @@ ALL_DIRECTORIES = [OUTPUT_DIR, INPUT_DIR, COMFYUI_TEMP_OUTPUT_DIR]
 
 mimetypes.add_type("image/webp", ".webp")
 
-# Save your example JSON to the same directory as predict.py
 api_json_file = "workflow_api.json"
 
 # Force HF offline
@@ -26,56 +25,85 @@ os.environ["HF_DATASETS_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
+
 class Predictor(BasePredictor):
     def setup(self):
         self.comfyUI = ComfyUI("127.0.0.1:8188")
         self.comfyUI.start_server(OUTPUT_DIR, INPUT_DIR)
 
-        # Give a list of weights filenames to download during setup
         with open(api_json_file, "r") as file:
             workflow = json.loads(file.read())
-        self.comfyUI.handle_weights(
-            workflow,
-            weights_to_download=[],
-        )
+        self.comfyUI.handle_weights(workflow)
 
-    def filename_with_extension(self, input_file, prefix):
-        extension = os.path.splitext(input_file.name)[1]
-        return f"{prefix}{extension}"
+    def aspect_ratio_to_width_height(self, aspect_ratio: str):
+        aspect_ratios = {
+            "1:1": (1024, 1024),
+            "16:9": (1344, 768),
+            "21:9": (1536, 640),
+            "3:2": (1216, 832),
+            "2:3": (832, 1216),
+            "4:5": (896, 1088),
+            "5:4": (1088, 896),
+            "9:16": (768, 1344),
+            "9:21": (640, 1536),
+        }
+        return aspect_ratios.get(aspect_ratio)
 
-    def handle_input_file(
-        self,
-        input_file: Path,
-        filename: str = "image.png",
-    ):
-        shutil.copy(input_file, os.path.join(INPUT_DIR, filename))
-
-    # Update nodes in the JSON workflow to modify your workflow based on the given inputs
     def update_workflow(self, workflow, **kwargs):
-        # Below is an example showing how to get the node you need and update the inputs
+        empty_latent_image = workflow["5"]["inputs"]
+        empty_latent_image["width"] = kwargs["width"]
+        empty_latent_image["height"] = kwargs["height"]
+        empty_latent_image["batch_size"] = kwargs["num_outputs"]
 
-        # positive_prompt = workflow["6"]["inputs"]
-        # positive_prompt["text"] = kwargs["prompt"]
+        shift = workflow["61"]["inputs"]
+        shift["width"] = kwargs["width"]
+        shift["height"] = kwargs["height"]
 
-        # negative_prompt = workflow["7"]["inputs"]
-        # negative_prompt["text"] = f"nsfw, {kwargs['negative_prompt']}"
+        lora = workflow["72"]["inputs"]
+        lora["strength_model"] = kwargs["lora_strength"]
 
-        # sampler = workflow["3"]["inputs"]
-        # sampler["seed"] = kwargs["seed"]
-        pass
+        prompt = workflow["6"]["inputs"]
+        prompt["text"] = kwargs["prompt"]
+
+        noise = workflow["25"]["inputs"]
+        noise["noise_seed"] = kwargs["seed"]
+
+        guidance = workflow["60"]["inputs"]
+        guidance["guidance"] = kwargs["guidance"]
+
+        sampler = workflow["17"]["inputs"]
+        sampler["steps"] = kwargs["num_inference_steps"]
 
     def predict(
         self,
         prompt: str = Input(
             default="",
         ),
-        negative_prompt: str = Input(
-            description="Things you do not want to see in your image",
-            default="",
+        aspect_ratio: str = Input(
+            description="Aspect ratio for the generated image",
+            choices=["1:1", "16:9", "21:9", "2:3", "3:2", "4:5", "5:4", "9:16", "9:21"],
+            default="1:1",
         ),
-        image: Path = Input(
-            description="An input image",
-            default=None,
+        num_outputs: int = Input(
+            description="Number of outputs to generate", default=1, le=4, ge=1
+        ),
+        num_inference_steps: int = Input(
+            description="Number of denoising steps. Recommended range is 28-50",
+            ge=1,
+            le=50,
+            default=30,
+        ),
+        guidance: float = Input(
+            description="Guidance for generated image",
+            ge=0,
+            le=10,
+            default=3.5,
+        ),
+        lora_strength: float = Input(
+            description="Strength of flux-realism lora, 0 is disabled",
+            ge=0,
+            le=2,
+            default=0.8,
         ),
         output_format: str = optimise_images.predict_output_format(),
         output_quality: int = optimise_images.predict_output_quality(),
@@ -83,29 +111,27 @@ class Predictor(BasePredictor):
     ) -> List[Path]:
         """Run a single prediction on the model"""
         self.comfyUI.cleanup(ALL_DIRECTORIES)
-
-        # Make sure to set the seeds in your workflow
         seed = seed_helper.generate(seed)
-
-        image_filename = None
-        if image:
-            image_filename = self.filename_with_extension(image, "image")
-            self.handle_input_file(image, image_filename)
 
         with open(api_json_file, "r") as file:
             workflow = json.loads(file.read())
 
+        width, height = self.aspect_ratio_to_width_height(aspect_ratio)
+
         self.update_workflow(
             workflow,
             prompt=prompt,
-            negative_prompt=negative_prompt,
-            image_filename=image_filename,
             seed=seed,
+            width=width,
+            height=height,
+            lora_strength=lora_strength,
+            num_inference_steps=num_inference_steps,
+            guidance=guidance,
+            num_outputs=num_outputs,
         )
 
-        wf = self.comfyUI.load_workflow(workflow)
         self.comfyUI.connect()
-        self.comfyUI.run_workflow(wf)
+        self.comfyUI.run_workflow(workflow)
 
         return optimise_images.optimise_image_files(
             output_format, output_quality, self.comfyUI.get_files(OUTPUT_DIR)
