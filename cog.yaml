@@ -20,6 +20,7 @@ build:
     - psutil
     - spandrel
     - kornia>=0.7.1
+    - websocket-client==1.6.3
 
     # fix for pydantic issues in cog
     # https://github.com/replicate/cog/issues/1623
